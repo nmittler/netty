@@ -21,8 +21,10 @@ import static io.netty.handler.codec.http2.Http2Error.PROTOCOL_ERROR;
 import static io.netty.handler.codec.http2.Http2Error.STREAM_CLOSED;
 import static io.netty.handler.codec.http2.Http2Stream.State.CLOSED;
 import static io.netty.util.CharsetUtil.UTF_8;
-import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyBoolean;
@@ -36,6 +38,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.buffer.UnpooledByteBufAllocator;
@@ -44,10 +47,9 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultChannelPromise;
+import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.GenericFutureListener;
-
-import java.util.List;
-
+import io.netty.util.concurrent.ScheduledFuture;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -57,6 +59,9 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
+
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Tests for {@link Http2ConnectionHandler}
@@ -98,6 +103,15 @@ public class Http2ConnectionHandlerTest {
     @Mock
     private Http2FrameWriter frameWriter;
 
+    @Mock
+    private EventExecutor executor;
+
+    @Mock
+    private ScheduledFuture<?> scheduledFuture;
+
+    private Http2Connection.Listener connectionListener;
+    private Runnable historyCleanupTask;
+
     @Before
     public void setup() throws Exception {
         MockitoAnnotations.initMocks(this);
@@ -131,6 +145,22 @@ public class Http2ConnectionHandlerTest {
         when(ctx.newSucceededFuture()).thenReturn(future);
         when(ctx.newPromise()).thenReturn(promise);
         when(ctx.write(any())).thenReturn(future);
+        when(ctx.executor()).thenReturn(executor);
+
+        doAnswer(new Answer<Void>() {
+            @Override
+            public Void answer(InvocationOnMock in) throws Throwable {
+                connectionListener = (Http2Connection.Listener) in.getArguments()[0];
+                return null;
+            }
+        }).when(connection).addListener(any(Http2Connection.Listener.class));
+        doAnswer(new Answer<ScheduledFuture<?>>() {
+            @Override
+            public ScheduledFuture<?> answer(InvocationOnMock in) throws Throwable {
+                historyCleanupTask = (Runnable) in.getArguments()[0];
+                return scheduledFuture;
+            }
+        }).when(executor).scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class));
     }
 
     private Http2ConnectionHandler newHandler() throws Exception {
@@ -301,6 +331,7 @@ public class Http2ConnectionHandlerTest {
         verify(ctx, times(1)).close(any(ChannelPromise.class));
     }
 
+    @Test
     public void canSendGoAwayFrame() throws Exception {
         handler = newHandler();
         ByteBuf data = mock(ByteBuf.class);
@@ -344,5 +375,30 @@ public class Http2ConnectionHandlerTest {
         assertFalse(promise.isSuccess());
         verify(data).release();
         verifyNoMoreInteractions(frameWriter);
+    }
+
+    @Test
+    public void removedStreamShouldAddToHistory() throws Exception {
+        handler = newHandler();
+        connectionListener.onStreamRemoved(stream);
+        Http2Stream removedStream = handler.history().requireStreamHistory(stream.id());
+        assertEquals(stream.id(), removedStream.id());
+    }
+
+    @Test
+    public void removedStreamsShouldExpire() throws Exception {
+        handler = newHandler();
+
+        connectionListener.onStreamRemoved(stream);
+        historyCleanupTask.run();
+        assertNotNull(handler.history().streamHistory(stream.id()));
+
+        int stream2Id = 3;
+        Http2Stream stream2 = mock(Http2Stream.class);
+        when(stream2.id()).thenReturn(stream2Id);
+        connectionListener.onStreamRemoved(stream2);
+        historyCleanupTask.run();
+        assertNotNull(handler.history().streamHistory(stream2Id));
+        assertNull(handler.history().streamHistory(stream.id()));
     }
 }

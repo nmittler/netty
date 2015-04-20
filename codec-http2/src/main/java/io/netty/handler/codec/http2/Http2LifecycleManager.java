@@ -26,18 +26,41 @@ import io.netty.channel.ChannelPromise;
 public interface Http2LifecycleManager {
 
     /**
+     * A database of stream history information for this connection.
+     */
+    interface History {
+        /**
+         * Looks up the final state for a stream that has been closed and removed from the {@link Http2Connection}.
+         *
+         * @return the final state for the stream or {@code null} if the stream never existed or the history for the
+         * stream is no longer maintained.
+         */
+        Http2Stream streamHistory(int streamId);
+
+        /**
+         * Same as {@link #streamHistory(int)} but throws a connection error if the stream is not found.
+         */
+        Http2Stream requireStreamHistory(int streamId) throws Http2Exception;
+    }
+
+    /**
+     * Gets the history of streams for this connection.
+     */
+    History history();
+
+    /**
      * Closes the local side of the {@code stream}. Depending on the {@code stream} state this may result in
-     * {@code stream} being closed. See {@link closeStream(Http2Stream, ChannelFuture)}.
+     * {@code stream} being closed. See {@link #closeStream(Http2Stream, ChannelFuture)}.
      * @param stream the stream to be half closed.
-     * @param future See {@link closeStream(Http2Stream, ChannelFuture)}.
+     * @param future See {@link #closeStream(Http2Stream, ChannelFuture)}.
      */
     void closeStreamLocal(Http2Stream stream, ChannelFuture future);
 
     /**
      * Closes the remote side of the {@code stream}. Depending on the {@code stream} state this may result in
-     * {@code stream} being closed. See {@link closeStream(Http2Stream, ChannelFuture)}.
+     * {@code stream} being closed. See {@link #closeStream(Http2Stream, ChannelFuture)}.
      * @param stream the stream to be half closed.
-     * @param future See {@link closeStream(Http2Stream, ChannelFuture)}.
+     * @param future See {@link #closeStream(Http2Stream, ChannelFuture)}.
      */
     void closeStreamRemote(Http2Stream stream, ChannelFuture future);
 

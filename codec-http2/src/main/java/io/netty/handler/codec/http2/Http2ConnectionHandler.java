@@ -22,6 +22,7 @@ import static io.netty.handler.codec.http2.Http2Error.NO_ERROR;
 import static io.netty.handler.codec.http2.Http2Error.PROTOCOL_ERROR;
 import static io.netty.handler.codec.http2.Http2Exception.connectionError;
 import static io.netty.handler.codec.http2.Http2Exception.isStreamError;
+import static io.netty.handler.codec.http2.Http2Exception.streamError;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
 import static java.lang.String.format;
 
@@ -34,11 +35,14 @@ import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.codec.http2.Http2Exception.CompositeStreamException;
 import io.netty.handler.codec.http2.Http2Exception.StreamException;
+import io.netty.util.collection.IntObjectHashMap;
 import io.netty.util.concurrent.GenericFutureListener;
+import io.netty.util.concurrent.ScheduledFuture;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Provides the default implementation for processing inbound frame events and delegates to a
@@ -51,10 +55,22 @@ import java.util.List;
  */
 public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http2LifecycleManager {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(Http2ConnectionHandler.class);
+    private static final long HISTORY_CLEANUP_INTERVAL = TimeUnit.SECONDS.toMillis(2);
+
     private final Http2ConnectionDecoder decoder;
     private final Http2ConnectionEncoder encoder;
+    private final StreamHistoryManager historyManager = new StreamHistoryManager();
+    private final Http2Connection.Listener historyPopulator = new Http2ConnectionAdapter() {
+        @Override
+        public void onStreamRemoved(Http2Stream stream) {
+            // Add this stream to the history.
+            historyManager.add(stream);
+        }
+    };
+
     private ChannelFutureListener closeListener;
     private BaseDecoder byteDecoder;
+    private ScheduledFuture<?> historyTimer;
 
     public Http2ConnectionHandler(boolean server, Http2FrameListener listener) {
         this(new DefaultHttp2Connection(server), listener);
@@ -68,6 +84,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
                                   Http2FrameWriter frameWriter, Http2FrameListener listener) {
         encoder = new DefaultHttp2ConnectionEncoder(connection, frameWriter);
         decoder = new DefaultHttp2ConnectionDecoder(connection, encoder, frameReader, listener);
+        connection.addListener(historyPopulator);
     }
 
     /**
@@ -81,6 +98,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
         if (encoder.connection() != decoder.connection()) {
             throw new IllegalArgumentException("Encoder and Decoder do not share the same connection object");
         }
+        encoder.connection().addListener(historyPopulator);
     }
 
     public Http2Connection connection() {
@@ -298,6 +316,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
         encoder.lifecycleManager(this);
         decoder.lifecycleManager(this);
         byteDecoder = new PrefaceDecoder(ctx);
+        startHistoryCleanupTimer(ctx);
     }
 
     @Override
@@ -306,6 +325,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
             byteDecoder.handlerRemoved(ctx);
             byteDecoder = null;
         }
+        stopHistoryCleanupTimer();
     }
 
     @Override
@@ -314,6 +334,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
             byteDecoder = new PrefaceDecoder(ctx);
         }
         byteDecoder.channelActive(ctx);
+        startHistoryCleanupTimer(ctx);
     }
 
     @Override
@@ -322,6 +343,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
             byteDecoder.channelInactive(ctx);
             byteDecoder = null;
         }
+        stopHistoryCleanupTimer();
     }
 
     @Override
@@ -380,7 +402,13 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
         }
     }
 
+    @Override
+    public final History history() {
+        return historyManager;
+    }
+
     /**
+
      * Closes the local side of the given stream. If this causes the stream to be closed, adds a
      * hook to close the channel after the given future completes.
      *
@@ -567,6 +595,34 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
     }
 
     /**
+     * Starts the periodic timer to cleanup stream history. If already started, does nothing.
+     */
+    private void startHistoryCleanupTimer(ChannelHandlerContext ctx) {
+        if (historyTimer == null) {
+            historyTimer = ctx.executor().scheduleWithFixedDelay(new Runnable() {
+                @Override
+                public void run() {
+                    // Run cleanup on the history.
+                    historyManager.cleanup();
+                }
+            }, HISTORY_CLEANUP_INTERVAL, HISTORY_CLEANUP_INTERVAL, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    /**
+     * Stops the periodic timer that cleans up stream history. If already stopped, does nothing.
+     */
+    private void stopHistoryCleanupTimer() {
+        try {
+            if (historyTimer != null) {
+                historyTimer.cancel(true);
+            }
+        } finally {
+            historyTimer = null;
+        }
+    }
+
+    /**
      * Returns the client preface string if this is a client connection, otherwise returns {@code null}.
      */
     private static ByteBuf clientPrefaceString(Http2Connection connection) {
@@ -590,4 +646,191 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
             ctx.close(promise);
         }
     }
+
+    /**
+     * Manager for stream history that stores history in a lightweight structure. Removes old history entries
+     * via {@link #cleanup}.
+     */
+    private static final class StreamHistoryManager implements History {
+        IntObjectHashMap<Http2Stream> historyNew = new IntObjectHashMap<Http2Stream>();
+        IntObjectHashMap<Http2Stream> historyOld = new IntObjectHashMap<Http2Stream>();
+
+        /**
+         * Looks up the history for the given stream.
+         */
+        @Override
+        public Http2Stream streamHistory(int streamId) {
+            Http2Stream history = historyNew.get(streamId);
+            if (history == null) {
+                return historyOld.get(streamId);
+            }
+            return history;
+        }
+
+        @Override
+        public Http2Stream requireStreamHistory(int streamId) throws Http2Exception {
+            Http2Stream stream = streamHistory(streamId);
+            if (stream == null) {
+                throw connectionError(PROTOCOL_ERROR, "Stream does not exist %d", streamId);
+            }
+            return stream;
+        }
+
+        /**
+         * Adds the given stream to the history.
+         */
+        void add(Http2Stream stream) {
+            // Add this stream to the most recent history map.
+            historyNew.put(stream.id(), new StreamHistory(stream));
+        }
+
+        /**
+         * Cleans up the data structures to remove old history entries.
+         */
+        void cleanup() {
+            // Swap the history maps.
+            IntObjectHashMap<Http2Stream> tmp = historyNew;
+            historyNew = historyOld;
+            historyOld = tmp;
+
+            // Clear the new map to remove the old streams.
+            historyNew.clear();
+        }
+    }
+
+    /**
+     * The history representing the final state for a stream that has been removed from the {@link Http2Connection}.
+     */
+    private static final class StreamHistory implements Http2Stream {
+        enum FinalState {
+            CLOSED_NORMALLY,
+            RESET_SENT,
+
+            // TODO(nathanmittler): do we need this? It's not currently supported in the Http2Stream interface.
+            RESET_RECEIVED
+        }
+
+        private final int id;
+        private final FinalState finalState;
+
+        StreamHistory(Http2Stream stream) {
+            id = stream.id();
+            finalState = stream.isResetSent() ? FinalState.RESET_SENT : FinalState.CLOSED_NORMALLY;
+        }
+
+        @Override
+        public int id() {
+            return id;
+        }
+
+        @Override
+        public State state() {
+            return State.CLOSED;
+        }
+
+        @Override
+        public Http2Stream open(boolean halfClosed) throws Http2Exception {
+            throw streamError(id, PROTOCOL_ERROR, "Attempting to open a removed stream");
+        }
+
+        @Override
+        public Http2Stream close() {
+            return this;
+        }
+
+        @Override
+        public Http2Stream closeLocalSide() {
+            return this;
+        }
+
+        @Override
+        public Http2Stream closeRemoteSide() {
+            return this;
+        }
+
+        @Override
+        public boolean isResetSent() {
+            return finalState == FinalState.RESET_SENT;
+        }
+
+        @Override
+        public Http2Stream resetSent() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean remoteSideOpen() {
+            return false;
+        }
+
+        @Override
+        public boolean localSideOpen() {
+            return false;
+        }
+
+        @Override
+        public Object setProperty(Object key, Object value) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public <V> V getProperty(Object key) {
+            return null;
+        }
+
+        @Override
+        public <V> V removeProperty(Object key) {
+            return null;
+        }
+
+        @Override
+        public Http2Stream setPriority(int parentStreamId, short weight, boolean exclusive) throws Http2Exception {
+            throw streamError(id, PROTOCOL_ERROR, "Attempting to set priority for a removed stream");
+        }
+
+        @Override
+        public boolean isRoot() {
+            return false;
+        }
+
+        @Override
+        public boolean isLeaf() {
+            return false;
+        }
+
+        @Override
+        public short weight() {
+            return 0;
+        }
+
+        @Override
+        public int totalChildWeights() {
+            return 0;
+        }
+
+        @Override
+        public Http2Stream parent() {
+            return null;
+        }
+
+        @Override
+        public int prioritizableForTree() {
+            return 0;
+        }
+
+        @Override
+        public boolean isDescendantOf(Http2Stream stream) {
+            return false;
+        }
+
+        @Override
+        public int numChildren() {
+            return 0;
+        }
+
+        @Override
+        public Http2Stream forEachChild(Http2StreamVisitor visitor) throws Http2Exception {
+            return null;
+        }
+    };
 }

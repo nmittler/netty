@@ -39,6 +39,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.Channel;
@@ -47,10 +48,6 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultChannelPromise;
 import io.netty.handler.codec.http2.Http2Exception.ClosedStreamCreationException;
-
-import java.util.Collections;
-import java.util.concurrent.atomic.AtomicInteger;
-
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
@@ -58,6 +55,9 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
+
+import java.util.Collections;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Tests for {@link DefaultHttp2ConnectionDecoder}.
@@ -113,6 +113,9 @@ public class DefaultHttp2ConnectionDecoderTest {
     @Mock
     private Http2LifecycleManager lifecycleManager;
 
+    @Mock
+    private Http2LifecycleManager.History history;
+
     @Before
     public void setup() throws Exception {
         MockitoAnnotations.initMocks(this);
@@ -134,8 +137,8 @@ public class DefaultHttp2ConnectionDecoderTest {
                 return null;
             }
         }).when(connection).forEachActiveStream(any(Http2StreamVisitor.class));
+        when(connection.streamMayHaveExisted(STREAM_ID)).thenReturn(true);
         when(connection.stream(STREAM_ID)).thenReturn(stream);
-        when(connection.requireStream(STREAM_ID)).thenReturn(stream);
         when(connection.local()).thenReturn(local);
         when(local.flowController()).thenReturn(localFlow);
         when(encoder.flowController()).thenReturn(remoteFlow);
@@ -149,6 +152,8 @@ public class DefaultHttp2ConnectionDecoderTest {
         when(ctx.newSucceededFuture()).thenReturn(future);
         when(ctx.newPromise()).thenReturn(promise);
         when(ctx.write(any())).thenReturn(future);
+
+        when(lifecycleManager.history()).thenReturn(history);
 
         decoder = new DefaultHttp2ConnectionDecoder(connection, encoder, reader, listener);
         decoder.lifecycleManager(lifecycleManager);
@@ -245,6 +250,41 @@ public class DefaultHttp2ConnectionDecoderTest {
     }
 
     @Test
+    public void dataReadForHistoricalStreamShouldIgnore() throws Exception {
+        mockHistoricalStream();
+
+        // Mark reset sent so that it will be ignored.
+        when(stream.isResetSent()).thenReturn(true);
+        final ByteBuf data = dummyData();
+        try {
+            decode().onDataRead(ctx, STREAM_ID, data, 10, true);
+            verify(localFlow).receiveFlowControlledFrame(eq(ctx), eq(stream), eq(data), eq(10), eq(true));
+            verify(listener, never()).onDataRead(eq(ctx), anyInt(), any(ByteBuf.class), anyInt(), anyBoolean());
+        } finally {
+            data.release();
+        }
+    }
+
+    @Test
+    public void dataReadForHistoricalStreamShouldThrow() throws Exception {
+        mockHistoricalStream();
+
+        final ByteBuf data = dummyData();
+        int padding = 10;
+        int processedBytes = data.readableBytes() + padding;
+        try {
+            decode().onDataRead(ctx, STREAM_ID, data, padding, true);
+            fail("Expected Http2Exception");
+        } catch (Http2Exception e) {
+            verify(localFlow).receiveFlowControlledFrame(eq(ctx), eq(stream), eq(data), eq(padding), eq(true));
+            verify(localFlow).consumeBytes(eq(ctx), eq(stream), eq(processedBytes));
+            verify(listener, never()).onDataRead(eq(ctx), anyInt(), any(ByteBuf.class), anyInt(), anyBoolean());
+        } finally {
+            data.release();
+        }
+    }
+
+    @Test
     public void dataReadWithEndOfStreamShouldcloseStreamRemote() throws Exception {
         final ByteBuf data = dummyData();
         try {
@@ -312,6 +352,32 @@ public class DefaultHttp2ConnectionDecoderTest {
         verify(listener, never()).onHeadersRead(eq(ctx), anyInt(), any(Http2Headers.class), anyInt(), anyBoolean());
         verify(remote, never()).createStream(anyInt());
         verify(stream, never()).open(anyBoolean());
+    }
+
+    @Test
+    public void headersReadForHistoricalStreamShouldBeIgnored() throws Exception {
+        mockHistoricalStream();
+
+        // Mark GOAWAY sent so that we ignore the frame.
+        when(connection.goAwaySent()).thenReturn(true);
+        decode().onHeadersRead(ctx, STREAM_ID, EmptyHttp2Headers.INSTANCE, 0, false);
+
+        // Verify that the event was absorbed and not propagated to the oberver.
+        verify(listener, never()).onHeadersRead(eq(ctx), anyInt(), any(Http2Headers.class), anyInt(), anyBoolean());
+        verify(remote, never()).createStream(anyInt());
+        verify(stream, never()).open(anyBoolean());
+    }
+
+    @Test (expected = Http2Exception.class)
+    public void headersReadForHistoricalStreamShouldThrow() throws Exception {
+        mockHistoricalStream();
+        decode().onHeadersRead(ctx, STREAM_ID, EmptyHttp2Headers.INSTANCE, 0, false);
+    }
+
+    @Test (expected = Http2Exception.class)
+    public void headersReadForMissingStreamShouldThrow() throws Exception {
+        mockMissingStream();
+        decode().onHeadersRead(ctx, STREAM_ID, EmptyHttp2Headers.INSTANCE, 0, false);
     }
 
     @Test
@@ -409,6 +475,23 @@ public class DefaultHttp2ConnectionDecoderTest {
     }
 
     @Test
+    public void pushPromiseReadForHistoricalStreamShouldBeIgnored() throws Exception {
+        mockHistoricalStream();
+
+        // Mark GOAWAY sent so we'll ignore.
+        when(connection.goAwaySent()).thenReturn(true);
+        decode().onPushPromiseRead(ctx, STREAM_ID, PUSH_STREAM_ID, EmptyHttp2Headers.INSTANCE, 0);
+        verify(remote, never()).reservePushStream(anyInt(), any(Http2Stream.class));
+        verify(listener, never()).onPushPromiseRead(eq(ctx), anyInt(), anyInt(), any(Http2Headers.class), anyInt());
+    }
+
+    @Test(expected = Http2Exception.class)
+    public void pushPromiseReadForMissingStreamShouldThrow() throws Exception {
+        mockMissingStream();
+        decode().onPushPromiseRead(ctx, STREAM_ID, PUSH_STREAM_ID, EmptyHttp2Headers.INSTANCE, 0);
+    }
+
+    @Test
     public void pushPromiseReadShouldSucceed() throws Exception {
         decode().onPushPromiseRead(ctx, STREAM_ID, PUSH_STREAM_ID, EmptyHttp2Headers.INSTANCE, 0);
         verify(remote).reservePushStream(eq(PUSH_STREAM_ID), eq(stream));
@@ -425,33 +508,24 @@ public class DefaultHttp2ConnectionDecoderTest {
     }
 
     @Test
+    public void priorityReadForHistoricalStreamShouldBeIgnored() throws Exception {
+        mockHistoricalStream();
+        when(connection.goAwaySent()).thenReturn(true);
+        decode().onPriorityRead(ctx, STREAM_ID, 0, (short) 255, true);
+        verify(stream, never()).setPriority(anyInt(), anyShort(), anyBoolean());
+        verify(listener, never()).onPriorityRead(eq(ctx), anyInt(), anyInt(), anyShort(), anyBoolean());
+    }
+
+    @Test
     public void priorityReadShouldSucceed() throws Exception {
-        when(connection.stream(STREAM_ID)).thenReturn(null);
-        when(connection.requireStream(STREAM_ID)).thenReturn(null);
+        when(connection.streamMayHaveExisted(STREAM_ID)).thenReturn(false);
+        mockMissingStream();
+
         decode().onPriorityRead(ctx, STREAM_ID, STREAM_DEPENDENCY_ID, (short) 255, true);
         verify(stream).setPriority(eq(STREAM_DEPENDENCY_ID), eq((short) 255), eq(true));
         verify(listener).onPriorityRead(eq(ctx), eq(STREAM_ID), eq(STREAM_DEPENDENCY_ID), eq((short) 255), eq(true));
         verify(remote).createStream(STREAM_ID);
         verify(stream, never()).open(anyBoolean());
-    }
-
-    @Test
-    public void priorityReadOnPreviouslyExistingStreamShouldSucceed() throws Exception {
-        doAnswer(new Answer<Http2Stream>() {
-            @Override
-            public Http2Stream answer(InvocationOnMock in) throws Throwable {
-                throw new ClosedStreamCreationException(Http2Error.INTERNAL_ERROR);
-            }
-        }).when(remote).createStream(eq(STREAM_ID));
-        when(connection.stream(STREAM_ID)).thenReturn(null);
-        when(connection.requireStream(STREAM_ID)).thenReturn(null);
-        // Just return the stream object as the connection stream to ensure the dependent stream "exists"
-        when(connection.stream(STREAM_DEPENDENCY_ID)).thenReturn(stream);
-        when(connection.requireStream(STREAM_DEPENDENCY_ID)).thenReturn(stream);
-        decode().onPriorityRead(ctx, STREAM_ID, STREAM_DEPENDENCY_ID, (short) 255, true);
-        verify(stream, never()).setPriority(anyInt(), anyShort(), anyBoolean());
-        verify(listener).onPriorityRead(eq(ctx), eq(STREAM_ID), eq(STREAM_DEPENDENCY_ID), eq((short) 255), eq(true));
-        verify(remote).createStream(STREAM_ID);
     }
 
     @Test
@@ -463,7 +537,6 @@ public class DefaultHttp2ConnectionDecoderTest {
             }
         }).when(stream).setPriority(eq(STREAM_DEPENDENCY_ID), eq((short) 255), eq(true));
         when(connection.stream(STREAM_ID)).thenReturn(stream);
-        when(connection.requireStream(STREAM_ID)).thenReturn(stream);
         decode().onPriorityRead(ctx, STREAM_ID, STREAM_DEPENDENCY_ID, (short) 255, true);
         verify(stream).setPriority(eq(STREAM_DEPENDENCY_ID), eq((short) 255), eq(true));
         verify(listener).onPriorityRead(eq(ctx), eq(STREAM_ID), eq(STREAM_DEPENDENCY_ID), eq((short) 255), eq(true));
@@ -477,10 +550,18 @@ public class DefaultHttp2ConnectionDecoderTest {
         verify(listener, never()).onWindowUpdateRead(eq(ctx), anyInt(), anyInt());
     }
 
+    @Test
+    public void windowUpdateReadForHistoricalStreamShouldIgnore() throws Exception {
+        mockHistoricalStream();
+        decode().onWindowUpdateRead(ctx, STREAM_ID, 10);
+        verify(remoteFlow, never()).incrementWindowSize(eq(ctx), any(Http2Stream.class), anyInt());
+        verify(listener, never()).onWindowUpdateRead(eq(ctx), anyInt(), anyInt());
+    }
+
     @Test(expected = Http2Exception.class)
-    public void windowUpdateReadForUnknownStreamShouldThrow() throws Exception {
-        when(connection.requireStream(5)).thenThrow(connectionError(PROTOCOL_ERROR, ""));
-        decode().onWindowUpdateRead(ctx, 5, 10);
+    public void windowUpdateReadForMissingStreamShouldThrow() throws Exception {
+        mockMissingStream();
+        decode().onWindowUpdateRead(ctx, STREAM_ID, 10);
     }
 
     @Test
@@ -498,10 +579,18 @@ public class DefaultHttp2ConnectionDecoderTest {
         verify(listener).onRstStreamRead(eq(ctx), anyInt(), anyLong());
     }
 
+    @Test
+    public void rstStreamReadForHistoricalStreamShouldIgnore() throws Exception {
+        mockHistoricalStream();
+        decode().onRstStreamRead(ctx, STREAM_ID, PROTOCOL_ERROR.code());
+        verify(lifecycleManager, never()).closeStream(eq(stream), eq(future));
+        verify(listener, never()).onRstStreamRead(eq(ctx), anyInt(), anyLong());
+    }
+
     @Test(expected = Http2Exception.class)
-    public void rstStreamReadForUnknownStreamShouldThrow() throws Exception {
-        when(connection.requireStream(5)).thenThrow(connectionError(PROTOCOL_ERROR, ""));
-        decode().onRstStreamRead(ctx, 5, PROTOCOL_ERROR.code());
+    public void rstStreamReadForMissingStreamShouldThrow() throws Exception {
+        mockMissingStream();
+        decode().onRstStreamRead(ctx, STREAM_ID, PROTOCOL_ERROR.code());
     }
 
     @Test
@@ -582,5 +671,17 @@ public class DefaultHttp2ConnectionDecoderTest {
             }
         }).when(listener).onDataRead(any(ChannelHandlerContext.class), anyInt(),
                 any(ByteBuf.class), anyInt(), anyBoolean());
+    }
+
+    private void mockHistoricalStream() throws Exception {
+        when(stream.state()).thenReturn(Http2Stream.State.CLOSED);
+        when(connection.stream(STREAM_ID)).thenReturn(null);
+        when(history.requireStreamHistory(STREAM_ID)).thenReturn(stream);
+    }
+
+    private void mockMissingStream() throws Exception {
+        when(stream.state()).thenReturn(Http2Stream.State.CLOSED);
+        when(connection.stream(STREAM_ID)).thenReturn(null);
+        when(history.requireStreamHistory(STREAM_ID)).thenThrow(connectionError(Http2Error.PROTOCOL_ERROR, "Fake"));
     }
 }

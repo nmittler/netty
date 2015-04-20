@@ -110,9 +110,12 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
     @Override
     public ChannelFuture writeData(final ChannelHandlerContext ctx, final int streamId, ByteBuf data, int padding,
             final boolean endOfStream, ChannelPromise promise) {
-        final Http2Stream stream;
+        Http2Stream stream;
         try {
-            stream = connection.requireStream(streamId);
+            stream = connection.stream(streamId);
+            if (stream == null) {
+                stream = lifecycleManager.history().requireStreamHistory(streamId);
+            }
             // Verify that the stream is in the appropriate state for sending DATA frames.
             switch (stream.state()) {
                 case OPEN:
@@ -250,7 +253,11 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
                 throw connectionError(PROTOCOL_ERROR, "Sending PUSH_PROMISE after GO_AWAY received.");
             }
 
-            Http2Stream stream = connection.requireStream(streamId);
+            Http2Stream stream = connection.stream(streamId);
+            if (stream == null) {
+                stream = lifecycleManager.history().requireStreamHistory(streamId);
+            }
+
             // Reserve the promised stream.
             connection.local().reservePushStream(promisedStreamId, stream);
         } catch (Throwable e) {
