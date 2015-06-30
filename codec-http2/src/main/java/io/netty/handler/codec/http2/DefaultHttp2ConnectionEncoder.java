@@ -133,8 +133,8 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
         }
 
         // Hand control of the frame to the flow controller.
-        flowController().addFlowControlled(ctx, stream,
-                new FlowControlledData(ctx, stream, data, padding, endOfStream, promise));
+        flowController().addFlowControlled(stream,
+                new FlowControlledData(stream, data, padding, endOfStream, promise));
         return promise;
     }
 
@@ -169,9 +169,9 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
             }
 
             // Pass headers to the flow-controller so it can maintain their sequence relative to DATA frames.
-            flowController().addFlowControlled(ctx, stream,
-                    new FlowControlledHeaders(ctx, stream, headers, streamDependency, weight,
-                            exclusive, padding, endOfStream, promise));
+            flowController().addFlowControlled(stream,
+                    new FlowControlledHeaders(stream, headers, streamDependency, weight, exclusive, padding,
+                            endOfStream, promise));
             return promise;
         } catch (Http2NoMoreStreamIdsException e) {
             lifecycleManager.onException(ctx, e);
@@ -321,10 +321,10 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
         private ByteBuf data;
         private int size;
 
-        private FlowControlledData(ChannelHandlerContext ctx, Http2Stream stream, ByteBuf buf, int padding,
-                                    boolean endOfStream, ChannelPromise promise) {
-            super(ctx, stream, padding, endOfStream, promise);
-            this.data = buf;
+        private FlowControlledData(Http2Stream stream, ByteBuf data, int padding, boolean endOfStream,
+                ChannelPromise promise) {
+            super(stream, padding, endOfStream, promise);
+            this.data = data;
             size = data.readableBytes() + padding;
         }
 
@@ -334,16 +334,18 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
         }
 
         @Override
-        public void error(Throwable cause) {
+        public void error(ChannelHandlerContext ctx, Throwable cause) {
             ReferenceCountUtil.safeRelease(data);
-            lifecycleManager.onException(ctx, cause);
+            if (ctx != null) {
+                lifecycleManager.onException(ctx, cause);
+            }
             data = null;
             size = 0;
             promise.tryFailure(cause);
         }
 
         @Override
-        public void write(int allowedBytes) {
+        public void write(ChannelHandlerContext ctx, int allowedBytes) {
             int bytesWritten = 0;
             if (data == null || (allowedBytes == 0 && size != 0)) {
                 // No point writing an empty DATA frame, wait for a bigger allowance.
@@ -400,7 +402,7 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
         }
 
         @Override
-        public boolean merge(Http2RemoteFlowController.FlowControlled next) {
+        public boolean merge(ChannelHandlerContext ctx, Http2RemoteFlowController.FlowControlled next) {
             if (FlowControlledData.class != next.getClass()) {
                 return false;
             }
@@ -447,16 +449,14 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
      * blocked on flow-control a HEADER frame must wait until this frame has been written.
      */
     private final class FlowControlledHeaders extends FlowControlledBase {
-
         private final Http2Headers headers;
         private final int streamDependency;
         private final short weight;
         private final boolean exclusive;
 
-        private FlowControlledHeaders(ChannelHandlerContext ctx, Http2Stream stream, Http2Headers headers,
-                int streamDependency, short weight, boolean exclusive, int padding,
-                boolean endOfStream, ChannelPromise promise) {
-            super(ctx, stream, padding, endOfStream, promise);
+        private FlowControlledHeaders(Http2Stream stream, Http2Headers headers, int streamDependency, short weight,
+                boolean exclusive, int padding, boolean endOfStream, ChannelPromise promise) {
+            super(stream, padding, endOfStream, promise);
             this.headers = headers;
             this.streamDependency = streamDependency;
             this.weight = weight;
@@ -469,23 +469,26 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
         }
 
         @Override
-        public void error(Throwable cause) {
-            lifecycleManager.onException(ctx, cause);
+        public void error(ChannelHandlerContext ctx, Throwable cause) {
+            if (ctx != null) {
+                lifecycleManager.onException(ctx, cause);
+            }
             promise.tryFailure(cause);
         }
 
         @Override
-        public void write(int allowedBytes) {
+        public void write(ChannelHandlerContext ctx, int allowedBytes) {
             if (promise.isVoid()) {
                 promise = ctx.newPromise();
                 promise.addListener(this);
             }
+
             frameWriter().writeHeaders(ctx, stream.id(), headers, streamDependency, weight, exclusive,
                     padding, endOfStream, promise);
         }
 
         @Override
-        public boolean merge(Http2RemoteFlowController.FlowControlled next) {
+        public boolean merge(ChannelHandlerContext ctx, Http2RemoteFlowController.FlowControlled next) {
             return false;
         }
     }
@@ -495,15 +498,13 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
      */
     public abstract class FlowControlledBase implements Http2RemoteFlowController.FlowControlled,
             ChannelFutureListener {
-        protected final ChannelHandlerContext ctx;
         protected final Http2Stream stream;
         protected ChannelPromise promise;
         protected boolean endOfStream;
         protected int padding;
 
-        public FlowControlledBase(final ChannelHandlerContext ctx, final Http2Stream stream, int padding,
-                                  boolean endOfStream, final ChannelPromise promise) {
-            this.ctx = ctx;
+        public FlowControlledBase(final Http2Stream stream, int padding, boolean endOfStream,
+                final ChannelPromise promise) {
             if (padding < 0) {
                 throw new IllegalArgumentException("padding must be >= 0");
             }
@@ -526,7 +527,7 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
         @Override
         public void operationComplete(ChannelFuture future) throws Exception {
             if (!future.isSuccess()) {
-                error(future.cause());
+                error(flowController().channelHandlerContext(), future.cause());
             }
         }
     }

@@ -63,6 +63,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import junit.framework.AssertionFailedError;
+
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
@@ -80,6 +81,7 @@ public class DefaultHttp2ConnectionEncoderTest {
     private static final int PUSH_STREAM_ID = 2;
 
     private Http2ConnectionEncoder encoder;
+    private ChannelPromise promise;
 
     @Mock
     private Http2Connection connection;
@@ -98,8 +100,6 @@ public class DefaultHttp2ConnectionEncoderTest {
 
     @Mock
     private Channel channel;
-
-    private ChannelPromise promise;
 
     @Mock
     private ChannelPromise voidPromise;
@@ -133,6 +133,7 @@ public class DefaultHttp2ConnectionEncoderTest {
     private List<Integer> writtenPadding;
     private boolean streamClosed;
 
+    @SuppressWarnings("unchecked")
     @Before
     public void setup() throws Exception {
         MockitoAnnotations.initMocks(this);
@@ -212,7 +213,7 @@ public class DefaultHttp2ConnectionEncoderTest {
                     }
                 });
         payloadCaptor = ArgumentCaptor.forClass(Http2RemoteFlowController.FlowControlled.class);
-        doNothing().when(remoteFlow).addFlowControlled(eq(ctx), eq(stream), payloadCaptor.capture());
+        doNothing().when(remoteFlow).addFlowControlled(eq(stream), payloadCaptor.capture());
         when(ctx.alloc()).thenReturn(UnpooledByteBufAllocator.DEFAULT);
         when(ctx.channel()).thenReturn(channel);
         when(ctx.newSucceededFuture()).thenReturn(future);
@@ -229,7 +230,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         final ByteBuf data = dummyData();
         encoder.writeData(ctx, STREAM_ID, data, 0, true, promise);
         assertEquals(payloadCaptor.getValue().size(), 8);
-        payloadCaptor.getValue().write(8);
+        payloadCaptor.getValue().write(ctx, 8);
         assertEquals(0, payloadCaptor.getValue().size());
         assertEquals("abcdefgh", writtenData.get(0));
         assertEquals(0, data.refCnt());
@@ -243,11 +244,11 @@ public class DefaultHttp2ConnectionEncoderTest {
         encoder.writeData(ctx, STREAM_ID, data, 0, true, secondPromise);
         List<FlowControlled> capturedWrites = payloadCaptor.getAllValues();
         FlowControlled mergedPayload = capturedWrites.get(0);
-        mergedPayload.merge(capturedWrites.get(1));
+        mergedPayload.merge(ctx, capturedWrites.get(1));
 
         assertEquals(16, mergedPayload.size());
         assertFalse(secondPromise.isSuccess());
-        mergedPayload.write(16);
+        mergedPayload.write(ctx, 16);
         assertEquals(0, mergedPayload.size());
         assertEquals("abcdefghabcdefgh", writtenData.get(0));
         assertEquals(0, data.refCnt());
@@ -263,10 +264,10 @@ public class DefaultHttp2ConnectionEncoderTest {
         encoder.writeData(ctx, STREAM_ID, data, 0, true, voidPromise);
         List<FlowControlled> capturedWrites = payloadCaptor.getAllValues();
         FlowControlled mergedPayload = capturedWrites.get(0);
-        assertTrue(mergedPayload.merge(capturedWrites.get(1)));
+        assertTrue(mergedPayload.merge(ctx, capturedWrites.get(1)));
 
         assertEquals(16, mergedPayload.size());
-        mergedPayload.write(16);
+        mergedPayload.write(ctx, 16);
         assertEquals(0, mergedPayload.size());
         assertEquals("abcdefghabcdefgh", writtenData.get(0));
         assertEquals(0, data.refCnt());
@@ -278,7 +279,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         encoder.writeData(ctx, STREAM_ID, data, 0, true, promise);
         encoder.writeHeaders(ctx, STREAM_ID, EmptyHttp2Headers.INSTANCE, 0, false, promise);
         List<FlowControlled> capturedWrites = payloadCaptor.getAllValues();
-        assertFalse(capturedWrites.get(0).merge(capturedWrites.get(1)));
+        assertFalse(capturedWrites.get(0).merge(ctx, capturedWrites.get(1)));
     }
 
     @Test
@@ -287,7 +288,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         final ByteBuf data = dummyData();
         encoder.writeData(ctx, STREAM_ID, data, 0, true, promise);
         assertEquals(payloadCaptor.getValue().size(), 8);
-        payloadCaptor.getValue().write(8);
+        payloadCaptor.getValue().write(ctx, 8);
         // writer was called 3 times
         assertEquals(3, writtenData.size());
         assertEquals("abc", writtenData.get(0));
@@ -302,7 +303,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         final ByteBuf data = dummyData();
         encoder.writeData(ctx, STREAM_ID, data, 5, true, promise);
         assertEquals(payloadCaptor.getValue().size(), 13);
-        payloadCaptor.getValue().write(13);
+        payloadCaptor.getValue().write(ctx, 13);
         // writer was called 3 times
         assertEquals(3, writtenData.size());
         assertEquals("abcde", writtenData.get(0));
@@ -320,7 +321,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         ByteBuf data = dummyData();
         encoder.writeData(ctx, STREAM_ID, data, 10, true, promise);
         assertEquals(payloadCaptor.getValue().size(), 18);
-        payloadCaptor.getValue().write(18);
+        payloadCaptor.getValue().write(ctx, 18);
         // writer was called 4 times
         assertEquals(4, writtenData.size());
         assertEquals("abcde", writtenData.get(0));
@@ -350,7 +351,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         when(frameSizePolicy.maxFrameSize()).thenReturn(5);
         encoder.writeData(ctx, STREAM_ID, data, 10, true, promise);
         assertEquals(payloadCaptor.getValue().size(), 10);
-        payloadCaptor.getValue().write(10);
+        payloadCaptor.getValue().write(ctx, 10);
         // writer was called 2 times
         assertEquals(2, writtenData.size());
         assertEquals("", writtenData.get(0));
@@ -369,7 +370,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         encoder.writeHeaders(ctx, streamId, EmptyHttp2Headers.INSTANCE, 0, false, promise);
         verify(local).createStream(eq(streamId), eq(false));
         assertNotNull(payloadCaptor.getValue());
-        payloadCaptor.getValue().write(0);
+        payloadCaptor.getValue().write(ctx, 0);
         verify(writer).writeHeaders(eq(ctx), eq(streamId), eq(EmptyHttp2Headers.INSTANCE), eq(0),
                 eq(DEFAULT_PRIORITY_WEIGHT), eq(false), eq(0), eq(false), eq(promise));
     }
@@ -382,7 +383,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         verify(stream).open(false);
         verify(stream, never()).closeLocalSide();
         assertNotNull(payloadCaptor.getValue());
-        payloadCaptor.getValue().write(0);
+        payloadCaptor.getValue().write(ctx, 0);
         verify(writer).writeHeaders(eq(ctx), eq(STREAM_ID), eq(EmptyHttp2Headers.INSTANCE), eq(0),
                                     eq(DEFAULT_PRIORITY_WEIGHT), eq(false), eq(0), eq(false), eq(promise));
     }
@@ -499,7 +500,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         mockSendFlowControlledWriteEverything();
         ByteBuf data = dummyData();
         encoder.writeData(ctx, STREAM_ID, data.retain(), 0, true, promise);
-        verify(remoteFlow).addFlowControlled(eq(ctx), eq(stream), any(FlowControlled.class));
+        verify(remoteFlow).addFlowControlled(eq(stream), any(FlowControlled.class));
         verify(lifecycleManager).closeStreamLocal(stream, promise);
         assertEquals(data.toString(UTF_8), writtenData.get(0));
         data.release();
@@ -520,7 +521,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         verify(local).createStream(eq(streamId), eq(true));
         // Trigger the write and mark the promise successful to trigger listeners
         assertNotNull(payloadCaptor.getValue());
-        payloadCaptor.getValue().write(0);
+        payloadCaptor.getValue().write(ctx, 0);
         promise.trySuccess();
         verify(lifecycleManager).closeStreamLocal(eq(stream), eq(promise));
     }
@@ -576,7 +577,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         when(remote.lastStreamKnownByPeer()).thenReturn(0);
         ByteBuf data = mock(ByteBuf.class);
         encoder.writeData(ctx, STREAM_ID, data, 0, false, promise);
-        verify(remoteFlow).addFlowControlled(eq(ctx), eq(stream), any(FlowControlled.class));
+        verify(remoteFlow).addFlowControlled(eq(stream), any(FlowControlled.class));
     }
 
     @Test
@@ -584,7 +585,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         when(connection.goAwaySent()).thenReturn(true);
         when(remote.lastStreamKnownByPeer()).thenReturn(0);
         encoder.writeHeaders(ctx, STREAM_ID, EmptyHttp2Headers.INSTANCE, 0, false, promise);
-        verify(remoteFlow).addFlowControlled(eq(ctx), eq(stream), any(FlowControlled.class));
+        verify(remoteFlow).addFlowControlled(eq(stream), any(FlowControlled.class));
     }
 
     @Test
@@ -593,7 +594,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         when(local.lastStreamKnownByPeer()).thenReturn(STREAM_ID);
         ByteBuf data = mock(ByteBuf.class);
         encoder.writeData(ctx, STREAM_ID, data, 0, false, promise);
-        verify(remoteFlow).addFlowControlled(eq(ctx), eq(stream), any(FlowControlled.class));
+        verify(remoteFlow).addFlowControlled(eq(stream), any(FlowControlled.class));
     }
 
     @Test
@@ -601,19 +602,19 @@ public class DefaultHttp2ConnectionEncoderTest {
         when(connection.goAwayReceived()).thenReturn(true);
         when(local.lastStreamKnownByPeer()).thenReturn(STREAM_ID);
         encoder.writeHeaders(ctx, STREAM_ID, EmptyHttp2Headers.INSTANCE, 0, false, promise);
-        verify(remoteFlow).addFlowControlled(eq(ctx), eq(stream), any(FlowControlled.class));
+        verify(remoteFlow).addFlowControlled(eq(stream), any(FlowControlled.class));
     }
 
     private void mockSendFlowControlledWriteEverything() {
         doAnswer(new Answer<Void>() {
             @Override
             public Void answer(InvocationOnMock invocationOnMock) throws Throwable {
-                FlowControlled flowControlled = (FlowControlled) invocationOnMock.getArguments()[2];
-                flowControlled.write(Integer.MAX_VALUE);
+                FlowControlled flowControlled = (FlowControlled) invocationOnMock.getArguments()[1];
+                flowControlled.write(ctx, Integer.MAX_VALUE);
                 flowControlled.writeComplete();
                 return null;
             }
-        }).when(remoteFlow).addFlowControlled(eq(ctx), eq(stream), payloadCaptor.capture());
+        }).when(remoteFlow).addFlowControlled(eq(stream), payloadCaptor.capture());
     }
 
     private void mockFutureAddListener(boolean success) {
