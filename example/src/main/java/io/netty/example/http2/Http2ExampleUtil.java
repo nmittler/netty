@@ -18,9 +18,13 @@ import static io.netty.util.internal.ObjectUtil.checkNotNull;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.QueryStringDecoder;
+import io.netty.handler.ssl.ApplicationProtocolNames;
+import io.netty.handler.ssl.OpenSsl;
+import io.netty.handler.ssl.SslProvider;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -79,5 +83,41 @@ public final class Http2ExampleUtil {
             return null;
         }
         return values.get(0);
+    }
+
+    public static String[] parseSupportedAlpnProtocols() {
+        String value = System.getProperty("supportedAlpnProtocols");
+        if (value == null) {
+            return new String[]{ ApplicationProtocolNames.HTTP_2, ApplicationProtocolNames.HTTP_1_1 };
+        }
+        String[] parts = value.split("\\,");
+        List<String> out = new ArrayList<String>(parts.length);
+        for (String part : parts) {
+            part = part.trim().toLowerCase();
+            if (!part.isEmpty()) {
+                out.add(part);
+            }
+        }
+        return out.toArray(new String[out.size()]);
+    }
+
+    public static boolean parseBoolean(String propertyName, boolean defaultValue) {
+        String value = System.getProperty(propertyName);
+        if (value == null) {
+            return defaultValue;
+        }
+        // Empty values default to true.
+        return value.isEmpty() || Boolean.parseBoolean(value);
+    }
+
+    public static SslProvider parseSslProvider() {
+        String value = System.getProperty("sslProvider");
+        if ("openssl".equalsIgnoreCase(value)) {
+            return SslProvider.OPENSSL;
+        }
+        if ("jdk".equalsIgnoreCase(value)) {
+            return SslProvider.JDK;
+        }
+        return OpenSsl.isAlpnSupported() ? SslProvider.OPENSSL : SslProvider.JDK;
     }
 }

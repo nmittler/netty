@@ -14,6 +14,8 @@
  */
 package io.netty.example.http2.helloworld.client;
 
+import static io.netty.handler.logging.LogLevel.INFO;
+
 import io.netty.channel.ChannelHandlerAdapter;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
@@ -38,8 +40,6 @@ import io.netty.handler.codec.http2.Http2OutboundFrameLogger;
 import io.netty.handler.codec.http2.HttpToHttp2ConnectionHandler;
 import io.netty.handler.codec.http2.InboundHttp2ToHttpAdapter;
 import io.netty.handler.ssl.SslContext;
-
-import static io.netty.handler.logging.LogLevel.INFO;
 
 /**
  * Configures the client pipeline to support HTTP/2 frames.
@@ -88,7 +88,7 @@ public class Http2ClientInitializer extends ChannelInitializer<SocketChannel> {
     }
 
     protected void configureEndOfPipeline(ChannelPipeline pipeline) {
-        pipeline.addLast(settingsHandler, responseHandler);
+        pipeline.addLast(settingsHandler, responseHandler, new UserEventLogger());
     }
 
     /**
@@ -111,8 +111,7 @@ public class Http2ClientInitializer extends ChannelInitializer<SocketChannel> {
 
         ch.pipeline().addLast(sourceCodec,
                               upgradeHandler,
-                              new UpgradeRequestHandler(),
-                              new UserEventLogger());
+                              new UpgradeRequestHandler());
     }
 
     /**
@@ -142,6 +141,12 @@ public class Http2ClientInitializer extends ChannelInitializer<SocketChannel> {
         public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
             System.out.println("User Event Triggered: " + evt);
             super.userEventTriggered(ctx, evt);
+        }
+
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+            cause.printStackTrace();
+            super.exceptionCaught(ctx, cause);
         }
     }
 

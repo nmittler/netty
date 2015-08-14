@@ -28,12 +28,13 @@ public class Http2OrHttpHandler extends ApplicationProtocolNegotiationHandler {
 
     private static final int MAX_CONTENT_LENGTH = 1024 * 100;
 
-    protected Http2OrHttpHandler() {
-        super(ApplicationProtocolNames.HTTP_1_1);
+    protected Http2OrHttpHandler(boolean fallbackToHttp_1_1) {
+        super(fallbackToHttp_1_1 ? ApplicationProtocolNames.HTTP_1_1 : ApplicationProtocolNames.HTTP_2);
     }
 
     @Override
     protected void configurePipeline(ChannelHandlerContext ctx, String protocol) throws Exception {
+        System.out.println("Connected via protocol: " + protocol);
         if (ApplicationProtocolNames.HTTP_2.equals(protocol)) {
             ctx.pipeline().addLast(new HelloWorldHttp2Handler());
             return;

@@ -14,6 +14,10 @@
  */
 package io.netty.example.http2.helloworld.client;
 
+import static io.netty.handler.codec.http.HttpMethod.GET;
+import static io.netty.handler.codec.http.HttpMethod.POST;
+import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
+
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -21,6 +25,7 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.example.http2.Http2ExampleUtil;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
@@ -30,8 +35,6 @@ import io.netty.handler.ssl.ApplicationProtocolConfig;
 import io.netty.handler.ssl.ApplicationProtocolConfig.Protocol;
 import io.netty.handler.ssl.ApplicationProtocolConfig.SelectedListenerFailureBehavior;
 import io.netty.handler.ssl.ApplicationProtocolConfig.SelectorFailureBehavior;
-import io.netty.handler.ssl.ApplicationProtocolNames;
-import io.netty.handler.ssl.OpenSsl;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslProvider;
@@ -40,10 +43,8 @@ import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.util.CharsetUtil;
 
 import java.net.URI;
+import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
-
-import static io.netty.handler.codec.http.HttpMethod.*;
-import static io.netty.handler.codec.http.HttpVersion.*;
 
 /**
  * An HTTP2 client that allows you to send HTTP2 frames to a server. Inbound and outbound frames are
@@ -52,7 +53,10 @@ import static io.netty.handler.codec.http.HttpVersion.*;
  */
 public final class Http2Client {
 
-    static final boolean SSL = System.getProperty("ssl") != null;
+    static final boolean SSL = Http2ExampleUtil.parseBoolean("ssl", false);
+    static final SslProvider SSL_PROVIDER = Http2ExampleUtil.parseSslProvider();
+    static final boolean ALPN = Http2ExampleUtil.parseBoolean("alpn", true);
+    static final String[] SUPPORTED_ALPN_PROTOCOLS = Http2ExampleUtil.parseSupportedAlpnProtocols();
     static final String HOST = System.getProperty("host", "127.0.0.1");
     static final int PORT = Integer.parseInt(System.getProperty("port", SSL? "8443" : "8080"));
     static final String URL = System.getProperty("url", "/whatever");
@@ -60,25 +64,41 @@ public final class Http2Client {
     static final String URL2DATA = System.getProperty("url2data", "test data!");
 
     public static void main(String[] args) throws Exception {
+        System.out.println("Settings: ");
+        System.out.println("  host: " + HOST);
+        System.out.println("  port: " + PORT);
+        System.out.println("  url: " + URL);
+        System.out.println("  url2: " + URL2);
+        System.out.println("  url2Data: " + URL2DATA);
+        System.out.println("  ssl: " + SSL);
+        if (SSL) {
+            System.out.println("  sslProvider: " + SSL_PROVIDER);
+            System.out.println("  alpn: " + ALPN);
+            if (ALPN) {
+                System.out.println(
+                        "  supportedAlpnProtocols: " + Arrays.toString(SUPPORTED_ALPN_PROTOCOLS));
+            }
+        }
+
         // Configure SSL.
         final SslContext sslCtx;
         if (SSL) {
-            SslProvider provider = OpenSsl.isAlpnSupported() ? SslProvider.OPENSSL : SslProvider.JDK;
-            sslCtx = SslContextBuilder.forClient()
-                .sslProvider(provider)
-                /* NOTE: the cipher filter may not include all ciphers required by the HTTP/2 specification.
-                 * Please refer to the HTTP/2 specification for cipher requirements. */
-                .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
-                .trustManager(InsecureTrustManagerFactory.INSTANCE)
-                .applicationProtocolConfig(new ApplicationProtocolConfig(
-                    Protocol.ALPN,
-                    // NO_ADVERTISE is currently the only mode supported by both OpenSsl and JDK providers.
-                    SelectorFailureBehavior.NO_ADVERTISE,
-                    // ACCEPT is currently the only mode supported by both OpenSsl and JDK providers.
-                    SelectedListenerFailureBehavior.ACCEPT,
-                    ApplicationProtocolNames.HTTP_2,
-                    ApplicationProtocolNames.HTTP_1_1))
-                .build();
+            SslContextBuilder builder = SslContextBuilder.forClient()
+                    .sslProvider(SSL_PROVIDER)
+                    /* NOTE: the cipher filter may not include all ciphers required by the HTTP/2 specification.
+                     * Please refer to the HTTP/2 specification for cipher requirements. */
+                    .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
+                    .trustManager(InsecureTrustManagerFactory.INSTANCE);
+            if (ALPN) {
+                builder.applicationProtocolConfig(new ApplicationProtocolConfig(
+                        Protocol.ALPN,
+                        // NO_ADVERTISE is currently the only mode supported by both OpenSsl and JDK providers.
+                        SelectorFailureBehavior.NO_ADVERTISE,
+                        // ACCEPT is currently the only mode supported by both OpenSsl and JDK providers.
+                        SelectedListenerFailureBehavior.ACCEPT,
+                        SUPPORTED_ALPN_PROTOCOLS));
+            }
+            sslCtx = builder.build();
         } else {
             sslCtx = null;
         }
@@ -101,7 +121,7 @@ public final class Http2Client {
 
             // Wait for the HTTP/2 upgrade to occur.
             Http2SettingsHandler http2SettingsHandler = initializer.settingsHandler();
-            http2SettingsHandler.awaitSettings(5, TimeUnit.SECONDS);
+            http2SettingsHandler.awaitSettings(30, TimeUnit.SECONDS);
 
             HttpResponseHandler responseHandler = initializer.responseHandler();
             int streamId = 3;

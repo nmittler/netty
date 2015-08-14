@@ -50,18 +50,12 @@ public class Http2ServerInitializer extends ChannelInitializer<SocketChannel> {
     };
 
     private final SslContext sslCtx;
-    private final int maxHttpContentLength;
+    private final int maxHttpContentLength = 16 * 1024;
+    private boolean fallbackToHttp_1_1;
 
-    public Http2ServerInitializer(SslContext sslCtx) {
-        this(sslCtx, 16 * 1024);
-    }
-
-    public Http2ServerInitializer(SslContext sslCtx, int maxHttpContentLength) {
-        if (maxHttpContentLength < 0) {
-            throw new IllegalArgumentException("maxHttpContentLength (expected >= 0): " + maxHttpContentLength);
-        }
+    public Http2ServerInitializer(SslContext sslCtx, boolean fallbackToHttp_1_1) {
         this.sslCtx = sslCtx;
-        this.maxHttpContentLength = maxHttpContentLength;
+        this.fallbackToHttp_1_1 = fallbackToHttp_1_1;
     }
 
     @Override
@@ -77,7 +71,9 @@ public class Http2ServerInitializer extends ChannelInitializer<SocketChannel> {
      * Configure the pipeline for TLS NPN negotiation to HTTP/2.
      */
     private void configureSsl(SocketChannel ch) {
-        ch.pipeline().addLast(sslCtx.newHandler(ch.alloc()), new Http2OrHttpHandler());
+        ch.pipeline().addLast(sslCtx.newHandler(ch.alloc()),
+                              new Http2OrHttpHandler(fallbackToHttp_1_1),
+                              new UserEventLogger());
     }
 
     /**
@@ -113,6 +109,12 @@ public class Http2ServerInitializer extends ChannelInitializer<SocketChannel> {
         public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
             System.out.println("User Event Triggered: " + evt);
             ctx.fireUserEventTriggered(evt);
+        }
+
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+            cause.printStackTrace();
+            super.exceptionCaught(ctx, cause);
         }
     }
 }

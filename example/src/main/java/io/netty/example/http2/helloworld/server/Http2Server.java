@@ -23,6 +23,7 @@ import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.example.http2.Http2ExampleUtil;
 import io.netty.handler.codec.http2.Http2SecurityUtil;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
@@ -38,6 +39,8 @@ import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.SupportedCipherSuiteFilter;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 
+import java.util.Arrays;
+
 /**
  * A HTTP/2 Server that responds to requests with a Hello World. Once started, you can test the
  * server with the example client.
@@ -45,29 +48,47 @@ import io.netty.handler.ssl.util.SelfSignedCertificate;
 public final class Http2Server {
 
     static final boolean SSL = System.getProperty("ssl") != null;
-
+    static final boolean ALPN = Http2ExampleUtil.parseBoolean("alpn", true);
+    static final SslProvider SSL_PROVIDER = Http2ExampleUtil.parseSslProvider();
+    static final String[] SUPPORTED_ALPN_PROTOCOLS = Http2ExampleUtil.parseSupportedAlpnProtocols();
     static final int PORT = Integer.parseInt(System.getProperty("port", SSL? "8443" : "8080"));
 
     public static void main(String[] args) throws Exception {
+        System.out.println("Settings: ");
+        System.out.println("  port: " + PORT);
+        System.out.println("  ssl: " + SSL);
+        if (SSL) {
+            System.out.println("  sslProvider: " + SSL_PROVIDER);
+            System.out.println("  alpn: " + ALPN);
+            if (ALPN) {
+                System.out.println(
+                        "  supportedAlpnProtocols: " + Arrays.toString(SUPPORTED_ALPN_PROTOCOLS));
+            }
+        }
+
         // Configure SSL.
         final SslContext sslCtx;
+        boolean fallbackToHttp_1_1 = false;
         if (SSL) {
-            SslProvider provider = OpenSsl.isAlpnSupported() ? SslProvider.OPENSSL : SslProvider.JDK;
             SelfSignedCertificate ssc = new SelfSignedCertificate();
-            sslCtx = SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
-                .sslProvider(provider)
-                /* NOTE: the cipher filter may not include all ciphers required by the HTTP/2 specification.
-                 * Please refer to the HTTP/2 specification for cipher requirements. */
-                .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
-                .applicationProtocolConfig(new ApplicationProtocolConfig(
-                    Protocol.ALPN,
-                    // NO_ADVERTISE is currently the only mode supported by both OpenSsl and JDK providers.
-                    SelectorFailureBehavior.NO_ADVERTISE,
-                    // ACCEPT is currently the only mode supported by both OpenSsl and JDK providers.
-                    SelectedListenerFailureBehavior.ACCEPT,
-                    ApplicationProtocolNames.HTTP_2,
-                    ApplicationProtocolNames.HTTP_1_1))
-                .build();
+            SslContextBuilder builder = SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
+                    .sslProvider(SSL_PROVIDER)
+                    /* NOTE: the cipher filter may not include all ciphers required by the HTTP/2 specification.
+                     * Please refer to the HTTP/2 specification for cipher requirements. */
+                    .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE);
+            if (ALPN) {
+                fallbackToHttp_1_1 = true;
+                builder.applicationProtocolConfig(new ApplicationProtocolConfig(
+                        Protocol.ALPN,
+                        // NO_ADVERTISE is currently the only mode supported by both OpenSsl and JDK providers.
+                        SelectorFailureBehavior.NO_ADVERTISE,
+                        // ACCEPT is currently the only mode supported by both OpenSsl and JDK providers.
+                        SelectedListenerFailureBehavior.ACCEPT,
+                        SUPPORTED_ALPN_PROTOCOLS));
+            } else {
+                builder.applicationProtocolConfig(null);
+            }
+            sslCtx = builder.build();
         } else {
             sslCtx = null;
         }
@@ -79,7 +100,7 @@ public final class Http2Server {
             b.group(group)
              .channel(NioServerSocketChannel.class)
              .handler(new LoggingHandler(LogLevel.INFO))
-             .childHandler(new Http2ServerInitializer(sslCtx));
+             .childHandler(new Http2ServerInitializer(sslCtx, fallbackToHttp_1_1));
 
             Channel ch = b.bind(PORT).sync().channel();
 
